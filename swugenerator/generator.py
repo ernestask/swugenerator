@@ -39,7 +39,6 @@ class SWUGenerator:
         self.artifactory = dirs
         self.cpiofile = SWUFile(self.out)
         self.vars = confvars
-        self.lines = []
         self.conf = libconf.AttrDict()
         self.filelist = []
         self.temp = TemporaryDirectory()
@@ -55,11 +54,6 @@ class SWUGenerator:
     @staticmethod
     def generate_iv():
         return secrets.token_hex(16)
-
-    def _read_swdesc(self):
-        with codecs.open(self.swdescription, "r") as f:
-            self.lines = f.readlines()
-            f.close()
 
     def close(self):
         self.temp.cleanup()
@@ -220,14 +214,21 @@ class SWUGenerator:
             swd.write(contents)
 
     def process(self):
-        self._read_swdesc()
-        self._expand_variables()
-        self._exec_functions()
+        from_file = libconf.TokenStream.from_file
 
-        swdesc = ""
-        for line in self.lines:
-            swdesc = swdesc + line
-        self.conf = libconf.loads(swdesc)
+        def _from_file(cls, f, **kwargs):
+            lines = f.readlines()
+
+            self._expand_variables(lines)
+            self._exec_functions(lines)
+
+            return from_file(lines, **kwargs)
+
+        libconf.TokenStream.from_file = classmethod(_from_file)
+
+        with codecs.open(self.swdescription, "r") as f:
+            self.conf = libconf.load(f, filename=self.swdescription)
+
         self.find_files_in_swdesc(self.conf.software)
 
         sw = Artifact("sw-description")
@@ -279,9 +280,8 @@ class SWUGenerator:
         for artifact in self.artifacts:
             self.cpiofile.addartifacttoswu(artifact.fullfilename)
 
-    def _expand_variables(self):
-        write_lines = []
-        for line in self.lines:
+    def _expand_variables(self, lines):
+        for index, line in enumerate(lines):
             while True:
                 m = re.match(
                     r"^(?P<before_placeholder>.+)@@(?P<variable_name>\w+)@@(?P<after_placeholder>.+)$",
@@ -297,11 +297,11 @@ class SWUGenerator:
                     continue
                 else:
                     break
-            write_lines.append(line)
-        self.lines = write_lines
 
-    def _exec_functions(self):
-        for index, line in enumerate(self.lines):
+            lines[index] = line
+
+    def _exec_functions(self, lines):
+        for index, line in enumerate(lines):
             m = re.match(
                 r"^(?P<before_placeholder>.+)\$(?P<function_name>\w+)\((?P<parms>.+)\)(?P<after_placeholder>.+)$",
                 line,
@@ -311,13 +311,12 @@ class SWUGenerator:
                     "self." + m.group("function_name") + '("' + m.group("parms") + '")'
                 )
                 ret = eval(fun)
-                line = (
+                lines[index] = (
                     m.group("before_placeholder")
                     + ret
                     + m.group("after_placeholder")
                     + "\n"
                 )
-                self.lines[index] = line
 
     def setenckey(self, k, iv):
         self.aeskey = k
